@@ -1,0 +1,16 @@
+[server]
+# must bind to 0.0.0.0 or the dashboard is unreachable from the host
+address = "0.0.0.0"
+port = 8501
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#2dd4bf"
+backgroundColor = "#0b1120"
+secondaryBackgroundColor = "#131c31"
+textColor = "#e2e8f0"
+font = "sans serif"

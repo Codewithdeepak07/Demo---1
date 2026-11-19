@@ -1,0 +1,13 @@
+# Qdrant configuration (mounted as /qdrant/config/production.yaml)
+# The storage path lives on the named volume "qdrant_data",
+# so the RAG index survives `docker compose down`.
+
+log_level: INFO
+
+storage:
+  storage_path: /qdrant/storage
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334

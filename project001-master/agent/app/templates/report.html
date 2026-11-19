@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice Audit Report – {{ r.invoice.invoice_no or r.invoice_id[:8] }} (run {{ r.validation_run }})</title>
+<style>
+  :root {
+    --ink: #0f172a; --muted: #64748b; --line: #e2e8f0; --bg: #f8fafc; --card: #ffffff;
+    --teal: #0d9488; --green: #16a34a; --amber: #d97706; --red: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 60px; }
+  header { background: linear-gradient(120deg, #0f172a, #134e4a); color: #fff; border-radius: 16px; padding: 28px 32px; }
+  header h1 { margin: 0 0 6px; font-size: 26px; }
+  header p { margin: 0; color: #cbd5e1; }
+  .pill { display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  .approve { background: #dcfce7; color: var(--green); }
+  .manual_review { background: #fef3c7; color: var(--amber); }
+  .reject { background: #fee2e2; color: var(--red); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin: 20px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; margin-top: 18px; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; color: #334155; }
+  td.num, th.num { text-align: right; }
+  .high { color: var(--red); font-weight: 600; }
+  .medium { color: var(--amber); font-weight: 600; }
+  .ok { color: var(--green); font-weight: 600; }
+  .muted { color: var(--muted); }
+  .summary { font-size: 15px; line-height: 1.6; }
+  footer { margin-top: 30px; color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Invoice Audit Report</h1>
+    <p>{{ r.invoice.vendor_name or "Unknown vendor" }} · Invoice {{ r.invoice.invoice_no or "—" }} ·
+       PO {{ r.invoice.po_number or "—" }} · Run {{ r.validation_run }} ({{ r.run_type }}) · {{ r.generated_at }}</p>
+    <p style="margin-top:14px"><span class="pill {{ r.recommendation }}">{{ r.recommendation | replace("_", " ") }}</span>
+       &nbsp; Validation status: <b>{{ r.validation_status }}</b></p>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="label">Invoice date</div><div class="value">{{ r.invoice.invoice_date or "—" }}</div></div>
+    <div class="card"><div class="label">Currency</div><div class="value">{{ r.invoice.currency or "—" }}</div></div>
+    <div class="card"><div class="label">Total amount</div><div class="value">{{ r.invoice.total_amount | money }}</div></div>
+    {% if r.translation %}
+    <div class="card"><div class="label">Language / confidence</div>
+      <div class="value">{{ r.translation.source_language }} · {{ "%.0f"|format((r.translation.confidence or 0) * 100) }}%</div></div>
+    {% endif %}
+  </div>
+
+  <section>
+    <h2>Summary</h2>
+    <p class="summary">{{ r.summary }}</p>
+    <ul>{% for reason in r.recommendation_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+  </section>
+
+  {% if r.discrepancy_summary %}
+  <section>
+    <h2>Discrepancy summary</h2>
+    <p>Total: <b>{{ r.discrepancy_summary.total }}</b> ·
+       <span class="high">High: {{ r.discrepancy_summary.high }}</span> ·
+       <span class="medium">Medium: {{ r.discrepancy_summary.medium }}</span></p>
+    {% if r.missing_fields %}<p>Missing fields: <b>{{ r.missing_fields | join(", ") }}</b></p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Discrepancies (this run)</h2>
+    {% if r.discrepancies %}
+    <table>
+      <tr><th>Check</th><th>Field</th><th>Invoice</th><th>ERP / expected</th><th class="num">Deviation %</th><th>Severity</th><th>Details</th></tr>
+      {% for d in r.discrepancies %}
+      <tr><td>{{ d.check_type }}</td><td>{{ d.field_name }}</td><td>{{ d.invoice_value if d.invoice_value is not none else "—" }}</td>
+          <td>{{ d.erp_value if d.erp_value is not none else "—" }}</td>
+          <td class="num">{{ "%.2f"|format(d.deviation_pct) if d.deviation_pct is not none else "—" }}</td>
+          <td class="{{ d.severity }}">{{ d.severity }}</td><td>{{ d.message }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="ok">No discrepancies found.</p>{% endif %}
+    <p class="muted"><b>Data checks:</b> {{ r.data_validation_notes }}</p>
+    <p class="muted"><b>ERP checks:</b> {{ r.business_validation_notes }}</p>
+  </section>
+
+  {% if r.revalidation %}
+  <section>
+    <h2>Corrections applied by the auditor</h2>
+    {% if r.revalidation.corrections_applied %}
+    <table>
+      <tr><th>Field</th><th>Original value</th><th>Corrected value</th><th>By</th><th>When</th></tr>
+      {% for c in r.revalidation.corrections_applied %}
+      <tr><td>{{ c.field_name }}</td><td>{{ c.original_value }}</td><td><b>{{ c.corrected_value }}</b></td><td>{{ c.corrected_by }}</td><td>{{ c.corrected_at }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="muted">No corrections - validation was simply re-run.</p>{% endif %}
+  </section>
+
+  <section>
+    <h2>Line-by-line recalculation vs ERP</h2>
+    <table>
+      <tr><th>#</th><th>Item</th><th class="num">Qty<br><span class="muted">inv / ERP</span></th>
+          <th class="num">Unit price<br><span class="muted">inv / ERP</span></th>
+          <th class="num">Line total<br><span class="muted">original</span></th>
+          <th class="num">Line total<br><span class="muted">recalculated</span></th>
+          <th class="num">Line total<br><span class="muted">ERP</span></th>
+          <th class="num">GST %</th><th class="num">Tax<br><span class="muted">recalc / ERP</span></th><th>Status</th></tr>
+      {% for l in r.revalidation.recalculation.lines %}
+      <tr><td>{{ l.line_number }}</td>
+          <td>{{ l.item_code or l.erp_item_code or "—" }}<br><span class="muted">{{ l.description or "" }}</span></td>
+          <td class="num">{{ l.qty }} / {{ l.erp_qty if l.erp_qty is not none else "—" }}</td>
+          <td class="num">{{ l.unit_price }} / {{ l.erp_unit_price if l.erp_unit_price is not none else "—" }}</td>
+          <td class="num">{{ l.original_line_total | money }}</td>
+          <td class="num"><b>{{ l.recalculated_line_total | money }}</b></td>
+          <td class="num">{{ l.erp_line_total | money }}</td>
+          <td class="num">{{ l.gst_rate }}</td>
+          <td class="num">{{ l.recalculated_tax | money }} / {{ l.erp_tax | money }}</td>
+          <td class="{{ 'ok' if l.status == 'matches ERP' else 'high' }}">{{ l.status }}</td></tr>
+      {% endfor %}
+    </table>
+    {% set o = r.revalidation.recalculation.original_totals %}
+    {% set n = r.revalidation.recalculation.recalculated_totals %}
+    {% set e = r.revalidation.recalculation.erp_totals %}
+    <table style="margin-top:16px; max-width:640px">
+      <tr><th></th><th class="num">Original invoice</th><th class="num">Recalculated</th><th class="num">As per ERP</th></tr>
+      <tr><td>Subtotal</td><td class="num">{{ o.subtotal | money }}</td><td class="num"><b>{{ n.subtotal | money }}</b></td><td class="num">{{ e.subtotal | money }}</td></tr>
+      <tr><td>Tax</td><td class="num">{{ o.tax_amount | money }}</td><td class="num"><b>{{ n.tax_amount | money }}</b></td><td class="num">{{ e.tax_amount | money }}</td></tr>
+      <tr><td>Total</td><td class="num">{{ o.total_amount | money }}</td><td class="num"><b>{{ n.total_amount | money }}</b></td><td class="num">{{ e.total_amount | money }}</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Discrepancies before re-validation (run {{ r.revalidation.previous_run }} · {{ (r.revalidation.previous_recommendation or "") | replace("_", " ") }})</h2>
+    {% if r.revalidation.previous_discrepancies %}
+    <table>
+      <tr><th>Field</th><th>Invoice</th><th>ERP / expected</th><th class="num">Deviation %</th><th>Details</th></tr>
+      {% for d in r.revalidation.previous_discrepancies %}
+      <tr><td>{{ d.field_name }}</td><td>{{ d.invoice_value if d.invoice_value is not none else "—" }}</td>
+          <td>{{ d.erp_value if d.erp_value is not none else "—" }}</td>
+          <td class="num">{{ "%.2f"|format(d.deviation_pct) if d.deviation_pct is not none else "—" }}</td><td>{{ d.message }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="ok">The previous run had no discrepancies.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Invoice line items{% if r.revalidation %} (after recalculation){% endif %}</h2>
+    <table>
+      <tr><th>#</th><th>Item code</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr>
+      {% for l in r.line_items %}
+      <tr><td>{{ l.line_number }}</td><td>{{ l.item_code or "—" }}</td><td>{{ l.description or "—" }}</td>
+          <td class="num">{{ l.qty }}</td><td class="num">{{ l.unit_price }}</td><td class="num">{{ l.total | money }}</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <section>
+    <h2>ERP purchase order</h2>
+    {% if r.erp.po %}
+    <p>PO <b>{{ r.erp.po.po_number }}</b> · Vendor {{ r.erp.po.vendor_id }}
+       {% if r.erp.vendor %}({{ r.erp.vendor.vendor_name }}, {{ r.erp.vendor.country }}, {{ r.erp.vendor.currency }}){% endif %}</p>
+    <table>
+      <tr><th>Item code</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Currency</th></tr>
+      {% for l in r.erp.po.line_items %}
+      <tr><td>{{ l.item_code }}</td><td>{{ l.description }}</td><td class="num">{{ l.qty }}</td><td class="num">{{ l.unit_price }}</td><td>{{ l.currency }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="high">No matching purchase order found in the ERP.</p>{% endif %}
+  </section>
+
+  <footer>AI Invoice Auditor · invoice id {{ r.invoice_id }} · source file {{ r.file_path }}</footer>
+</div>
+</body>
+</html>

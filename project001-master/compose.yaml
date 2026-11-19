@@ -1,0 +1,173 @@
+# =============================================================
+# AI Invoice Auditor - six containers on one bridge network
+#
+#   docker compose up --build -d      # start everything
+#   docker compose down               # stop, KEEP data (volumes survive)
+#   docker compose down -v            # stop and DELETE data volumes
+#
+# Secrets (AWS keys, DB password) come from .env via env_file.
+# Services talk to each other by service name + CONTAINER port.
+# =============================================================
+name: invoice-auditor
+
+services:
+
+  # -----------------------------------------------------------
+  # 1. PostgreSQL - durable system of record
+  # -----------------------------------------------------------
+  postgres:
+    image: postgres:16.4
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro     # schemas + ERP seed, first start only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  # -----------------------------------------------------------
+  # 2. Qdrant - vector index (derived from PostgreSQL)
+  # -----------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./qdrant/config/config.yaml:/qdrant/config/production.yaml:ro
+    healthcheck:
+      # the image has no curl, so use bash's /dev/tcp to call the readiness endpoint
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  # -----------------------------------------------------------
+  # 3. Redis - disposable cache (no volume on purpose)
+  # -----------------------------------------------------------
+  redis:
+    image: redis:7.4
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  # -----------------------------------------------------------
+  # 4. mock-erp - the only route to ERP data
+  # -----------------------------------------------------------
+  mock-erp:
+    build: ./mock-erp
+    image: invoice-auditor/mock-erp:1.0
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  # -----------------------------------------------------------
+  # 5. agent - LangGraph workflow, RAG and the only writer of audit data
+  # -----------------------------------------------------------
+  agent:
+    build: ./agent
+    image: invoice-auditor/agent:1.0
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      ERP_BASE_URL: http://mock-erp:8000
+      INCOMING_DIR: /app/data/incoming
+      REPORTS_DIR: /app/outputs/reports
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"     # don't download the price list from GitHub at startup
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./shared/data/incoming:/app/data/incoming          # monitored folder (dev convenience)
+      - ./shared/outputs/reports:/app/outputs/reports      # generated JSON + HTML reports
+      - ./agent/config:/app/config:ro                      # rules.yaml / prompts.yaml without rebuild
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  # -----------------------------------------------------------
+  # 6. streamlit-ui - reads audit schema, calls agent for changes
+  # -----------------------------------------------------------
+  streamlit-ui:
+    build: ./streamlit-ui
+    image: invoice-auditor/streamlit-ui:1.0
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      AGENT_URL: http://agent:8000
+      REPORTS_DIR: /app/outputs/reports
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./shared/outputs/reports:/app/outputs/reports:ro    # to show / download HTML reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+volumes:
+  postgres_data:      # audit trail, ERP data, LangGraph checkpoints
+  qdrant_data:        # RAG index
+
+networks:
+  auditor-net:
+    driver: bridge

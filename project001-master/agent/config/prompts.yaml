@@ -1,0 +1,237 @@
+# =============================================================
+# AI Invoice Auditor - Agent personas and prompt templates
+# =============================================================
+# Every LLM call in the agent reads its system persona and prompt
+# from this file, so prompts can be tuned without touching code.
+# Placeholders in {curly_braces} are filled in with str.format().
+# Literal braces in JSON examples are doubled: {{ }}
+# =============================================================
+
+personas:
+  translator: >
+    You are a professional translator for a logistics company's accounts payable
+    team. You translate vendor invoices into English accurately. You never change
+    numbers, codes, dates, currency symbols or the layout of tables.
+
+  field_parser: >
+    You are a meticulous invoice data-entry specialist. You read invoice text and
+    copy values exactly as printed. You never guess or invent values: if a value
+    is not printed on the invoice, you return null.
+
+  data_validator: >
+    You are an invoice data quality auditor. You explain data problems in short,
+    plain sentences that a non-technical accounts clerk can understand.
+
+  business_validator: >
+    You are a procurement auditor who compares vendor invoices against purchase
+    orders in the ERP. You explain each mismatch in plain, factual language.
+
+  reporter: >
+    You are a senior accounts payable auditor writing a short, factual audit
+    summary for a busy finance manager.
+
+  rag_router: >
+    You decide whether a question about invoices is best answered with a SQL
+    query over structured audit tables, or by searching invoice and report text.
+
+  sql_writer: >
+    You write safe, read-only PostgreSQL SELECT queries over the audit schema.
+
+  rag_generator: >
+    You are an invoice audit assistant. You answer questions using ONLY the
+    context provided. If the context does not contain the answer, you say so.
+
+  rag_reflector: >
+    You are a strict evaluator of question-answering quality using the RAG Triad.
+
+prompts:
+  # ---------------------------------------------------------------
+  detect_language: |
+    Identify the language of the invoice text below. Ignore numbers, codes,
+    company names and addresses.
+    - Answer "en" ONLY if every label, line description and charge name is English.
+    - If ANY line description, item name or charge name is in another language
+      (even when the headings are English), answer that other language.
+    {language_hint}
+
+    Respond with JSON only: {{"source_language": "<ISO 639-1 code, e.g. en, de, es, vi>"}}
+
+    INVOICE TEXT (start of document):
+    <<<
+    {text}
+    >>>
+
+  # ---------------------------------------------------------------
+  translate: |
+    The invoice text below is written in '{source_language}'. Translate it into English.
+    Rules:
+    - Keep every number, code (e.g. SKU-201, PO-1003), date and currency symbol unchanged.
+    - Keep the line structure and table separators as they are.
+    - Words that are already English stay as they are.
+    - confidence is your honest estimate (0.0 - 1.0) that the translation is complete and accurate.
+
+    Respond with JSON only, in this exact shape:
+    {{"confidence": <number>, "translated_text": "<english text>"}}
+
+    INVOICE TEXT:
+    <<<
+    {text}
+    >>>
+
+  # ---------------------------------------------------------------
+  parse_fields: |
+    Extract the invoice fields from the English invoice text below.
+    Rules:
+    - Copy values exactly as printed. If something is not printed, use null. Do NOT infer.
+    - invoice_date must be in YYYY-MM-DD format.
+    - currency: the ISO code (USD, EUR, ...) or the symbol ($, €, ₹, £) exactly as printed
+      on the invoice. If no currency code or symbol is printed anywhere, use null.
+    - Numbers must be plain numbers without currency symbols or thousands separators.
+    - tax_rate is the percentage printed next to the tax line (e.g. 10 for "Tax (10%)"), else null.
+    - taxable_base: the amount the tax was calculated on, when the invoice prints it
+      (e.g. "VAT 5.26% on 6,280,000" -> 6280000). Use it when only some charges are taxed.
+      If tax is simply charged on the whole subtotal, use null.
+    - MULTI-CURRENCY invoices: if charges are listed in more than one currency and converted
+      into one currency (e.g. an "Amount in VND" column and an exchange rate), then:
+        * currency = the currency of the grand total.
+        * subtotal, tax_amount, total_amount and EVERY line's unit_price and total must be in
+          that same currency. Always take the converted column, never the original amount.
+        * unit_price = the converted line total divided by qty.
+        * put the original currency and amount of each line in its description,
+          e.g. "Ocean freight (USD 5000.00)".
+    - One entry in line_items per invoice line. Charges such as "Fuel Surcharge" are line items too.
+    - extras: any other useful fields printed on the invoice (address, bill of lading,
+      vessel, payment reference...) as a flat object of strings.
+
+    Respond with JSON only, in this exact shape:
+    {{
+      "invoice_no": "string or null",
+      "invoice_date": "YYYY-MM-DD or null",
+      "vendor_name": "string or null",
+      "po_number": "string or null",
+      "currency": "string or null",
+      "subtotal": number or null,
+      "tax_rate": number or null,
+      "taxable_base": number or null,
+      "tax_amount": number or null,
+      "total_amount": number or null,
+      "line_items": [
+        {{"item_code": "string or null", "description": "string or null",
+          "qty": number or null, "unit_price": number or null, "total": number or null}}
+      ],
+      "extras": {{}}
+    }}
+
+    INVOICE TEXT:
+    <<<
+    {text}
+    >>>
+
+  # ---------------------------------------------------------------
+  data_validation_notes: |
+    These data-quality problems were found by rule checks on invoice {invoice_no}:
+    {issues}
+
+    Write 1-3 short sentences explaining what is wrong with the invoice data and
+    what an auditor should check. Plain text only.
+
+  # ---------------------------------------------------------------
+  business_validation_notes: |
+    These mismatches were found when comparing invoice {invoice_no} with
+    purchase order {po_number} in the ERP:
+    {issues}
+
+    Write 1-3 short sentences explaining the mismatches and their business impact.
+    Plain text only.
+
+  # ---------------------------------------------------------------
+  report_summary: |
+    Write a 3-5 sentence audit summary for this invoice validation result.
+    Mention the recommendation and the main reasons. Plain text, no bullet points.
+
+    Invoice: {invoice_no} from {vendor_name} (PO {po_number})
+    Run type: {run_type}
+    Recommendation: {recommendation}
+    Reasons: {reasons}
+    Discrepancies: {discrepancies}
+    Corrections applied by auditor: {corrections}
+
+  # ---------------------------------------------------------------
+  rag_route: |
+    Decide how to answer the question.
+    - "sql": counting, listing, filtering, totals, dates, statuses, "how many", "which invoices",
+      "total amount" - anything answerable from structured columns.
+    - "rag": explanations, "why", descriptions, details inside invoice or report text.
+
+    Question: {question}
+
+    Respond with JSON only: {{"route": "sql" or "rag"}}
+
+  # ---------------------------------------------------------------
+  sql_generate: |
+    Write ONE PostgreSQL SELECT query that answers the question.
+    Only use these tables (always schema-qualified with audit.):
+
+    audit.invoice_audit(invoice_id uuid, file_path, invoice_number, vendor_id, vendor_name,
+        po_number, invoice_date date, currency, subtotal numeric, tax_amount numeric,
+        total_amount numeric, source_language, translation_confidence numeric,
+        validation_status ['passed','partial','failed'],
+        recommendation ['approve','manual_review','reject'],
+        processing_status ['detected','processed','failed'], processed_at timestamptz)
+    audit.invoice_line_items(invoice_id, line_number, item_code, description,
+        quantity numeric, unit_price numeric, line_total numeric)
+    audit.discrepancies(invoice_id, validation_run int, line_number, check_type ['data','business'],
+        rule ['missing_field','invalid_type','invalid_currency','total_mismatch','tax_mismatch',
+              'po_missing','po_not_found','vendor_not_found','currency_mismatch','item_not_on_po',
+              'qty_mismatch','price_mismatch','sku_not_found'],
+        field_name, invoice_value, erp_value, deviation_pct numeric, severity ['high','medium'],
+        message, detected_at)
+    audit.human_feedback(invoice_id, field_name, original_value, corrected_value,
+        corrected_by, corrected_at, revalidated boolean)
+    audit.validation_reports(invoice_id, validation_run, run_type, validation_status,
+        recommendation, created_at)
+
+    Notes: discrepancies of the latest run have the highest validation_run per invoice.
+    {invoice_filter}
+
+    Question: {question}
+
+    Respond with JSON only: {{"sql": "SELECT ..."}}
+
+  # ---------------------------------------------------------------
+  sql_answer: |
+    Answer the question in 1-4 clear sentences using only the SQL result below.
+    If the result is empty, say that no matching records were found.
+
+    Question: {question}
+    SQL used: {sql}
+    Result rows (JSON): {rows}
+
+  # ---------------------------------------------------------------
+  rag_generate: |
+    Answer the question using ONLY the context below. Be specific: quote invoice
+    numbers, amounts and field names where relevant. If the answer is not in the
+    context, say "I could not find that in the processed invoices."
+
+    CONTEXT:
+    {context}
+
+    QUESTION: {question}
+
+  # ---------------------------------------------------------------
+  rag_reflect: |
+    Evaluate the answer with the RAG Triad. Give each score between 0.0 and 1.0:
+    - answer_relevance: does the answer address the question?
+    - groundedness: is every claim in the answer supported by the context?
+    - context_relevance: is the retrieved context relevant to the question?
+
+    QUESTION: {question}
+
+    CONTEXT:
+    {context}
+
+    ANSWER:
+    {answer}
+
+    Respond with JSON only:
+    {{"answer_relevance": <number>, "groundedness": <number>, "context_relevance": <number>, "comment": "<one sentence>"}}
